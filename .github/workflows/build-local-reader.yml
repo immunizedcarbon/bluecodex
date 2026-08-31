@@ -43,12 +43,16 @@ jobs:
         run: |
           set -euo pipefail
           ANDROID_CLI="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/android"
-          "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" sdk list 'platforms/.*' --all --all-versions --canary | grep -E 'android-37|Cinnamon' || true
-          if ! "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" sdk install --canary platforms/android-37; then
-            "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" sdk install --canary platforms/android-CinnamonBun
+          "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" --no-metrics sdk install --canary platforms/android-37 || true
+          if [[ ! -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" ]]; then
+            "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" --no-metrics sdk install --canary platforms/android-CinnamonBun || true
           fi
-          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" || \
-            test -f "$ANDROID_SDK_ROOT/platforms/android-CinnamonBun/android.jar"
+          if [[ ! -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" && ! -f "$ANDROID_SDK_ROOT/platforms/android-CinnamonBun/android.jar" ]]; then
+            echo "API 37 platform still unresolved. Available matching packages:" >&2
+            "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" --no-metrics sdk list '.*' --all --all-versions --canary \
+              | grep -iE 'cinnamon|android.?37|platforms/' || true
+            exit 1
+          fi
 
       - name: Gradle 9.5
         uses: gradle/actions/setup-gradle@v4
