@@ -42,8 +42,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager "platforms;android-CinnamonBun" "build-tools;36.0.0" >/dev/null
-          test -f "$ANDROID_SDK_ROOT/platforms/android-CinnamonBun/android.jar"
+          ANDROID_CLI="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/android"
+          "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" sdk list 'platforms/.*' --all --all-versions --canary | grep -E 'android-37|Cinnamon' || true
+          if ! "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" sdk install --canary platforms/android-37; then
+            "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" sdk install --canary platforms/android-CinnamonBun
+          fi
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" || \
+            test -f "$ANDROID_SDK_ROOT/platforms/android-CinnamonBun/android.jar"
 
       - name: Gradle 9.5
         uses: gradle/actions/setup-gradle@v4
