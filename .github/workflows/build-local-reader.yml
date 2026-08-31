@@ -38,21 +38,18 @@ jobs:
           cmdline-tools-version: 15859902
           packages: platform-tools
 
-      - name: Install Android 17 / API 37
+      - name: Install Android 17 / API 37.0
         shell: bash
         run: |
           set -euo pipefail
-          ANDROID_CLI="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/android"
-          "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" --no-metrics sdk install --canary platforms/android-37 || true
-          if [[ ! -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" ]]; then
-            "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" --no-metrics sdk install --canary platforms/android-CinnamonBun || true
-          fi
-          if [[ ! -f "$ANDROID_SDK_ROOT/platforms/android-37/android.jar" && ! -f "$ANDROID_SDK_ROOT/platforms/android-CinnamonBun/android.jar" ]]; then
-            echo "API 37 platform still unresolved. Available matching packages:" >&2
-            "$ANDROID_CLI" --sdk="$ANDROID_SDK_ROOT" --no-metrics sdk list '.*' --all --all-versions --canary \
-              | grep -iE 'cinnamon|android.?37|platforms/' || true
-            exit 1
-          fi
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
+            "platform-tools"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.0/android.jar"
+          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
 
       - name: Gradle 9.5
         uses: gradle/actions/setup-gradle@v4
@@ -99,8 +96,13 @@ jobs:
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+          AAPT2="$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
           test -s "$APK"
-          apksigner verify --verbose --print-certs "$APK"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          "$AAPT2" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "sdkVersion:'37'" /tmp/badging.txt
+          grep -q "targetSdkVersion:'37'" /tmp/badging.txt
           unzip -l "$APK" | grep -q "lib/arm64-v8a/"
           if unzip -l "$APK" | grep -Eq "lib/(armeabi-v7a|x86|x86_64)/"; then
             echo "Unexpected non-arm64 native library found" >&2
