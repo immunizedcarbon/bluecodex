@@ -35,10 +35,12 @@ jobs:
       - name: Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install API 37
+      - name: Install Android 17 / API 37
         shell: bash
         run: |
-          yes | sdkmanager "platforms;android-37" "build-tools;36.0.0" >/dev/null
+          set -euo pipefail
+          yes | sdkmanager "platforms;android-CinnamonBun" "build-tools;36.0.0" >/dev/null
+          test -f "$ANDROID_SDK_ROOT/platforms/android-CinnamonBun/android.jar"
 
       - name: Gradle 9.5
         uses: gradle/actions/setup-gradle@v4
