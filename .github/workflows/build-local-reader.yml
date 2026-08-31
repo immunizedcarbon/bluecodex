@@ -1,0 +1,131 @@
+name: Build Local Reader APK
+
+on:
+  push:
+    branches:
+      - chatgpt/tts-reader-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Materialize clean project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app core data storage
+          rm -f settings.gradle.kts build.gradle.kts gradle.properties README-LOCAL-READER.md
+          base64 --decode .ci/localreader-project.tar.gz.b64 | tar -xzf -
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install API 37
+        shell: bash
+        run: |
+          yes | sdkmanager "platforms;android-37" "build-tools;36.0.0" >/dev/null
+
+      - name: Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Fetch sherpa-onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          curl --fail --location --retry 4 --retry-delay 2 \
+            -o app/libs/sherpa-onnx-1.13.6.aar \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-1.13.6.aar"
+          echo "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698  app/libs/sherpa-onnx-1.13.6.aar" \
+            | sha256sum --check --strict
+
+      - name: Create ephemeral release key
+        shell: bash
+        run: |
+          keytool -genkeypair \
+            -keystore "$RUNNER_TEMP/localreader.jks" \
+            -storepass "localreader-2026" \
+            -keypass "localreader-2026" \
+            -alias "localreader" \
+            -keyalg RSA \
+            -keysize 3072 \
+            -validity 3650 \
+            -dname "CN=Local Reader, OU=Personal Build, O=Local Reader, L=Berlin, C=DE"
+
+      - name: Build release APK
+        shell: bash
+        env:
+          LOCALREADER_KEYSTORE: ${{ runner.temp }}/localreader.jks
+          LOCALREADER_STORE_PASSWORD: localreader-2026
+          LOCALREADER_KEY_ALIAS: localreader
+          LOCALREADER_KEY_PASSWORD: localreader-2026
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --console=plain :app:assembleRelease
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          apksigner verify --verbose --print-certs "$APK"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/"
+          if unzip -l "$APK" | grep -Eq "lib/(armeabi-v7a|x86|x86_64)/"; then
+            echo "Unexpected non-arm64 native library found" >&2
+            exit 1
+          fi
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk \
+            dist/LocalReader-1.0.0-arm64-api37.apk
+          (
+            cd dist
+            sha256sum LocalReader-1.0.0-arm64-api37.apk > SHA256SUMS.txt
+          )
+          cat > dist/BUILDINFO.txt <<'EOF'
+          Local Reader 1.0.0
+          minSdk=37
+          targetSdk=37
+          compileSdk=37
+          ABI=arm64-v8a
+          AGP=9.3.0
+          Gradle=9.5.0
+          Kotlin=2.4.10 (AGP built-in Kotlin)
+          Compose BOM=2026.08.00
+          Activity Compose=1.13.0
+          Material3=1.5.0-alpha27
+          sherpa-onnx=1.13.6
+          TTS model=Supertonic 3 INT8 (downloaded at runtime from Hugging Face)
+          Model payload is not bundled in the APK.
+          Signing key is ephemeral for this one-off personal build.
+          EOF
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-reader-apk
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
