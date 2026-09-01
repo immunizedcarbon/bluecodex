@@ -25,11 +25,16 @@ jobs:
           rm -rf app core data storage
           rm -f settings.gradle.kts build.gradle.kts gradle.properties README-LOCAL-READER.md
           base64 --decode .ci/localreader-project.tar.gz.b64 | tar -xzf -
-          sed -i '/^import androidx\.compose\.foundation\.layout\.weight$/d' \
+          echo '--- MainScreen before patch ---'
+          nl -ba app/src/main/kotlin/app/localreader/MainScreen.kt | sed -n '15,28p'
+          echo '--- ModelManager before patch ---'
+          nl -ba app/src/main/kotlin/app/localreader/ModelManager.kt | sed -n '176,190p'
+          sed -i '/androidx\.compose\.foundation\.layout\.weight/d' \
             app/src/main/kotlin/app/localreader/MainScreen.kt
-          sed -i 's/connection\.errorStream/connection?.errorStream/g' \
+          sed -i '184s/connection\./connection?./' \
             app/src/main/kotlin/app/localreader/ModelManager.kt
-          grep -n "connection?.errorStream" app/src/main/kotlin/app/localreader/ModelManager.kt
+          echo '--- ModelManager after patch ---'
+          nl -ba app/src/main/kotlin/app/localreader/ModelManager.kt | sed -n '180,187p'
 
       - name: Java 17
         uses: actions/setup-java@v5
