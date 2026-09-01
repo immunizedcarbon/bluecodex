@@ -1,0 +1,141 @@
+name: Build Local Reader Final APK
+
+on:
+  push:
+    branches:
+      - chatgpt/tts-reader-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Materialize and patch project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app core data storage
+          rm -f settings.gradle.kts build.gradle.kts gradle.properties README-LOCAL-READER.md
+          base64 --decode .ci/localreader-project.tar.gz.b64 | tar -xzf -
+          sed -i '/^import androidx\.compose\.foundation\.layout\.weight$/d' \
+            app/src/main/kotlin/app/localreader/MainScreen.kt
+          sed -i 's/connection\.errorStream/connection?.errorStream/g' \
+            app/src/main/kotlin/app/localreader/ModelManager.kt
+          grep -n "connection?.errorStream" app/src/main/kotlin/app/localreader/ModelManager.kt
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android tools
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 15859902
+          packages: platform-tools
+
+      - name: Install API 37.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
+            "platform-tools"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.0/android.jar"
+          test -x "$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+
+      - name: Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Fetch sherpa-onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          curl --fail --location --retry 4 --retry-delay 2 \
+            -o app/libs/sherpa-onnx-1.13.6.aar \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-1.13.6.aar"
+          echo "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698  app/libs/sherpa-onnx-1.13.6.aar" \
+            | sha256sum --check --strict
+
+      - name: Build signed release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LOCALREADER_STORE_PASSWORD="$(openssl rand -hex 24)"
+          export LOCALREADER_KEY_PASSWORD="$LOCALREADER_STORE_PASSWORD"
+          export LOCALREADER_KEY_ALIAS="localreader"
+          export LOCALREADER_KEYSTORE="$RUNNER_TEMP/localreader.jks"
+          keytool -genkeypair \
+            -keystore "$LOCALREADER_KEYSTORE" \
+            -storepass "$LOCALREADER_STORE_PASSWORD" \
+            -keypass "$LOCALREADER_KEY_PASSWORD" \
+            -alias "$LOCALREADER_KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 3072 \
+            -validity 3650 \
+            -dname "CN=Local Reader, OU=Personal Build, O=Local Reader, C=DE"
+          gradle --no-daemon --console=plain :app:assembleRelease
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+          AAPT2="$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+          test -s "$APK"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          "$AAPT2" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "sdkVersion:'37'" /tmp/badging.txt
+          grep -q "targetSdkVersion:'37'" /tmp/badging.txt
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/"
+          if unzip -l "$APK" | grep -Eq "lib/(armeabi-v7a|x86|x86_64)/"; then
+            echo "Unexpected non-arm64 native library found" >&2
+            exit 1
+          fi
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk dist/LocalReader-1.0.0-arm64-api37.apk
+          cd dist
+          sha256sum LocalReader-1.0.0-arm64-api37.apk > SHA256SUMS.txt
+          cat > BUILDINFO.txt <<'EOF'
+          Local Reader 1.0.0
+          minSdk=37
+          targetSdk=37
+          compileSdk=37
+          ABI=arm64-v8a
+          AGP=9.3.0
+          Gradle=9.5.0
+          Kotlin=2.4.10
+          sherpa-onnx=1.13.6
+          TTS model=Supertonic 3 INT8, downloaded at runtime
+          Model payload is not bundled in the APK.
+          APK is release-built and signed with a per-build private key.
+          EOF
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-reader-final-apk
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
