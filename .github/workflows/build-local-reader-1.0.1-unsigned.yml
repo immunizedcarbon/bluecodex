@@ -1,0 +1,166 @@
+name: Build Local Reader 1.0.1 Unsigned
+
+on:
+  push:
+    branches:
+      - chatgpt/tts-reader-20260831
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Materialize and patch project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app core data storage
+          rm -f settings.gradle.kts build.gradle.kts gradle.properties README-LOCAL-READER.md
+          base64 --decode .ci/localreader-project.tar.gz.b64 | tar -xzf -
+
+          # Existing compile fixes from the first production build.
+          sed -i '/androidx\.compose\.foundation\.layout\.weight/d' app/src/main/kotlin/app/localreader/MainScreen.kt
+          sed -i 's/activeConnection\.disconnect()/activeConnection?.disconnect()/g' app/src/main/kotlin/app/localreader/ModelManager.kt
+
+          # Remove the JNI callback path entirely. sherpa-onnx JNI looks up
+          # invoke(float[]): Integer by name/descriptor; R8 can legally transform
+          # Kotlin lambda implementations. Synchronous per-sentence generation avoids
+          # that reflective ABI and the JNI callback threading path.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/kotlin/app/localreader/ReaderService.kt')
+          s = p.read_text()
+          old = '''                tts.generateWithConfigAndCallback(
+                      text = segment,
+                      config = config,
+                  ) { samples ->
+                      if (id != generation.get()) {
+                          0
+                      } else if (writeSamples(id, track, samples)) {
+                          1
+                      } else {
+                          0
+                      }
+                  }
+          '''
+          # Normalize indentation exactly as materialized source contains it.
+          old = old.replace('                  text', '                    text').replace('                  config', '                    config').replace('              )', '                )')
+          if old not in s:
+              start = s.index('                tts.generateWithConfigAndCallback(')
+              end = s.index('\n            }\n\n            if (id == generation.get())', start)
+              block = s[start:end]
+          else:
+              block = old
+          new = '''                val audio = tts.generateWithConfig(
+                      text = segment,
+                      config = config,
+                  )
+                  if (id != generation.get()) break
+                  if (!writeSamples(id, track, audio.samples)) break
+          '''.replace('                  text', '                    text').replace('                  config', '                    config').replace('              )', '                )').replace('                  if', '                if')
+          s = s.replace(block, new)
+          p.write_text(s)
+          PY
+
+          # API 37 only: remove obsolete manifest extraction knob.
+          sed -i '/android:extractNativeLibs="false"/d' app/src/main/AndroidManifest.xml
+
+          # Version bump and unsigned release. Signing happens outside CI with a stable private key.
+          sed -i 's/versionCode = 1/versionCode = 2/' app/build.gradle.kts
+          sed -i 's/versionName = "1.0.0"/versionName = "1.0.1"/' app/build.gradle.kts
+          sed -i '/signingConfig = signingConfigs.getByName("release")/d' app/build.gradle.kts
+
+          # Keep only JNI-referenced sherpa classes plus optional Window warnings.
+          cat >> app/proguard-rules.pro <<'EOF'
+          -dontwarn androidx.window.extensions.**
+          -dontwarn androidx.window.sidecar.**
+          EOF
+
+          ! grep -q 'generateWithConfigAndCallback' app/src/main/kotlin/app/localreader/ReaderService.kt
+          grep -n -A8 -B3 'val audio = tts.generateWithConfig' app/src/main/kotlin/app/localreader/ReaderService.kt
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android tools
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 15859902
+          packages: platform-tools
+
+      - name: Install API 37.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-37.0" "build-tools;37.0.0" "platform-tools"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-37.0/android.jar"
+          test -f "$ANDROID_SDK_ROOT/build-tools/37.0.0/lib/apksigner.jar"
+
+      - name: Gradle 9.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Fetch sherpa-onnx runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          curl --fail --location --retry 4 --retry-delay 2 \
+            -o app/libs/sherpa-onnx-1.13.6.aar \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-1.13.6.aar"
+          echo "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698  app/libs/sherpa-onnx-1.13.6.aar" | sha256sum --check --strict
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --console=plain :app:assembleRelease
+
+      - name: Verify unsigned APK metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          AAPT2="$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+          test -s "$APK"
+          "$AAPT2" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "package: name='app.localreader' versionCode='2' versionName='1.0.1'" /tmp/badging.txt
+          grep -q "minSdkVersion:'37'" /tmp/badging.txt
+          grep -q "targetSdkVersion:'37'" /tmp/badging.txt
+          grep -q "native-code: 'arm64-v8a'" /tmp/badging.txt
+          if unzip -l "$APK" | grep -Eq "lib/(armeabi-v7a|x86|x86_64)/"; then
+            echo "Unexpected non-arm64 native library found" >&2
+            exit 1
+          fi
+
+      - name: Package unsigned APK and signing tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/signing-tools/lib
+          cp app/build/outputs/apk/release/app-release-unsigned.apk dist/LocalReader-1.0.1-arm64-api37-unsigned.apk
+          cp "$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner" dist/signing-tools/apksigner
+          cp "$ANDROID_SDK_ROOT/build-tools/37.0.0/lib/apksigner.jar" dist/signing-tools/lib/apksigner.jar
+          chmod +x dist/signing-tools/apksigner
+          cd dist
+          sha256sum LocalReader-1.0.1-arm64-api37-unsigned.apk > SHA256SUMS-UNSIGNED.txt
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-reader-1.0.1-unsigned
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
