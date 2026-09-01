@@ -29,7 +29,12 @@ jobs:
             app/src/main/kotlin/app/localreader/MainScreen.kt
           sed -i 's/activeConnection\.disconnect()/activeConnection?.disconnect()/g' \
             app/src/main/kotlin/app/localreader/ModelManager.kt
+          cat >> app/proguard-rules.pro <<'EOF'
+          -dontwarn androidx.window.extensions.**
+          -dontwarn androidx.window.sidecar.**
+          EOF
           grep -n "activeConnection?.disconnect" app/src/main/kotlin/app/localreader/ModelManager.kt
+          tail -n 4 app/proguard-rules.pro
 
       - name: Java 17
         uses: actions/setup-java@v5
