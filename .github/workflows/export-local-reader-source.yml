@@ -1,0 +1,235 @@
+name: Export Local Reader Source
+
+on:
+  push:
+    branches:
+      - chatgpt/tts-reader-20260831
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Materialize final source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          base64 --decode .ci/localreader-project.tar.gz.b64 | tar -xzf - -C export
+
+          sed -i '/androidx\.compose\.foundation\.layout\.weight/d' \
+            export/app/src/main/kotlin/app/localreader/MainScreen.kt
+          sed -i 's/activeConnection\.disconnect()/activeConnection?.disconnect()/g' \
+            export/app/src/main/kotlin/app/localreader/ModelManager.kt
+
+          if ! grep -q -- '-dontwarn androidx.window.extensions.\*\*' export/app/proguard-rules.pro; then
+            cat >> export/app/proguard-rules.pro <<'EOF'
+          -dontwarn androidx.window.extensions.**
+          -dontwarn androidx.window.sidecar.**
+          EOF
+          fi
+
+          rm -rf export/.gradle export/**/build export/app/libs
+          find export -name '*.jks' -o -name '*.keystore' -o -name 'local.properties' | xargs -r rm -f
+
+          cat > export/.gitignore <<'EOF'
+          .gradle/
+          local.properties
+          **/build/
+          app/libs/*.aar
+          *.jks
+          *.keystore
+          .idea/
+          *.iml
+          EOF
+
+          mkdir -p export/.github/workflows
+          cat > export/.github/workflows/build-release.yml <<'EOF'
+          name: Build Release APK
+
+          on:
+            workflow_dispatch:
+            push:
+              branches: [ main ]
+
+          permissions:
+            contents: read
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              timeout-minutes: 30
+              steps:
+                - uses: actions/checkout@v5
+
+                - uses: actions/setup-java@v5
+                  with:
+                    distribution: temurin
+                    java-version: '17'
+
+                - uses: android-actions/setup-android@v3
+                  with:
+                    cmdline-tools-version: 15859902
+                    packages: platform-tools
+
+                - name: Install Android API 37.0
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/15859902/bin/sdkmanager"
+                    yes | "$SDKMANAGER" --licenses >/dev/null || true
+                    "$SDKMANAGER" --install \
+                      "platforms;android-37.0" \
+                      "build-tools;37.0.0" \
+                      "platform-tools"
+
+                - uses: gradle/actions/setup-gradle@v4
+                  with:
+                    gradle-version: '9.5.0'
+
+                - name: Fetch sherpa-onnx runtime
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    mkdir -p app/libs
+                    curl --fail --location --retry 4 --retry-delay 2 \
+                      -o app/libs/sherpa-onnx-1.13.6.aar \
+                      "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-1.13.6.aar"
+                    echo "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698  app/libs/sherpa-onnx-1.13.6.aar" \
+                      | sha256sum --check --strict
+
+                - name: Build signed release APK
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    export LOCALREADER_STORE_PASSWORD="$(openssl rand -hex 24)"
+                    export LOCALREADER_KEY_PASSWORD="$LOCALREADER_STORE_PASSWORD"
+                    export LOCALREADER_KEY_ALIAS="localreader"
+                    export LOCALREADER_KEYSTORE="$RUNNER_TEMP/localreader.jks"
+                    keytool -genkeypair \
+                      -keystore "$LOCALREADER_KEYSTORE" \
+                      -storepass "$LOCALREADER_STORE_PASSWORD" \
+                      -keypass "$LOCALREADER_KEY_PASSWORD" \
+                      -alias "$LOCALREADER_KEY_ALIAS" \
+                      -keyalg RSA -keysize 3072 -validity 3650 \
+                      -dname "CN=Local Reader, OU=Personal Build, O=Local Reader, C=DE"
+                    gradle --no-daemon --console=plain :app:assembleRelease
+
+                - name: Verify APK
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    APK="app/build/outputs/apk/release/app-release.apk"
+                    APKSIGNER="$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+                    AAPT2="$ANDROID_SDK_ROOT/build-tools/37.0.0/aapt2"
+                    "$APKSIGNER" verify --verbose --print-certs "$APK"
+                    "$AAPT2" dump badging "$APK" | tee /tmp/badging.txt
+                    grep -q "minSdkVersion:'37'" /tmp/badging.txt
+                    grep -q "targetSdkVersion:'37'" /tmp/badging.txt
+                    grep -q "native-code: 'arm64-v8a'" /tmp/badging.txt
+
+                - uses: actions/upload-artifact@v4
+                  with:
+                    name: local-reader-release-apk
+                    path: app/build/outputs/apk/release/app-release.apk
+                    if-no-files-found: error
+          EOF
+
+          cat > export/README.md <<'EOF'
+          # Local Reader
+
+          Private Android text-to-speech reader optimized for a Pixel 9a running GrapheneOS / Android 17.
+
+          ## What it does
+
+          - Paste arbitrary text and read it aloud locally.
+          - Uses sherpa-onnx with Supertonic 3 INT8.
+          - Downloads the TTS model at runtime and verifies model files before use.
+          - Supports German, English and Russian in the current UI.
+          - Provides play/pause/stop controls and foreground playback.
+          - Targets Android API 37 and arm64-v8a only.
+          - No Google Play Services dependency.
+
+          ## Build stack
+
+          - Android API 37 / Android 17
+          - AGP 9.3.0
+          - Gradle 9.5.0
+          - Kotlin 2.4.10
+          - Jetpack Compose
+          - sherpa-onnx 1.13.6
+
+          The sherpa-onnx AAR is intentionally not committed. The included GitHub Actions workflow downloads version 1.13.6 and verifies its SHA-256 before building.
+
+          ## Build
+
+          Use the included GitHub Actions workflow (`Build Release APK`) or install Android Platform 37.0 locally and run:
+
+          ```bash
+          gradle :app:assembleRelease
+          ```
+
+          Release signing expects these environment variables:
+
+          - `LOCALREADER_KEYSTORE`
+          - `LOCALREADER_STORE_PASSWORD`
+          - `LOCALREADER_KEY_ALIAS`
+          - `LOCALREADER_KEY_PASSWORD`
+
+          The workflow generates an ephemeral private signing key per build. For upgradeable personal releases, replace that with a persistent private keystore stored outside the repository.
+
+          ## Model
+
+          Supertonic 3 INT8 is not committed to this repository or bundled in the APK. The app downloads the model at runtime. Model licensing is separate from this application's source code; review the upstream Supertonic model license before redistribution.
+
+          ## Privacy
+
+          Text synthesis is performed locally after the model has been downloaded. Network access is used for the model download path.
+
+          ## Repository status
+
+          This source tree corresponds to the release code path that successfully built and passed APK signature, API-level and arm64 packaging checks on 2026-09-01.
+          EOF
+
+          cat > export/NOTICE.md <<'EOF'
+          # Third-party notices
+
+          This project uses third-party components and model artifacts with their own licenses.
+
+          - sherpa-onnx: https://github.com/k2-fsa/sherpa-onnx
+          - Supertonic 3 model: upstream model/repository licensing applies
+          - AndroidX / Jetpack Compose: Android Open Source / Apache-licensed components as applicable
+
+          Do not assume this repository's private status changes any third-party license obligations.
+          EOF
+
+          cat > export/REPOSITORY.md <<'EOF'
+          # Suggested repository settings
+
+          - Repository name: `local-reader-android`
+          - Visibility: **Private**
+          - Default branch: `main`
+          - Description: `Private on-device Android TTS reader for Pixel 9a / GrapheneOS using sherpa-onnx and Supertonic 3.`
+          - Do not commit signing keystores, passwords, downloaded model files, or generated APKs.
+          - Keep Actions enabled for reproducible release builds.
+          EOF
+
+          (cd export && zip -qr ../LocalReader-source-repo-ready.zip .)
+          sha256sum LocalReader-source-repo-ready.zip > LocalReader-source-repo-ready.zip.sha256
+
+      - name: Upload source bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-reader-source-repo-ready
+          path: |
+            LocalReader-source-repo-ready.zip
+            LocalReader-source-repo-ready.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
