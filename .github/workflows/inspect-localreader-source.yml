@@ -1,0 +1,34 @@
+name: Inspect Local Reader Source
+
+on:
+  push:
+    branches:
+      - chatgpt/tts-reader-20260831
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Materialize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app core data storage
+          rm -f settings.gradle.kts build.gradle.kts gradle.properties README-LOCAL-READER.md
+          base64 --decode .ci/localreader-project.tar.gz.b64 | tar -xzf -
+          mkdir -p inspect
+          cp app/src/main/kotlin/app/localreader/ReaderService.kt inspect/
+          cp app/src/main/kotlin/app/localreader/ModelManager.kt inspect/
+          cp app/build.gradle.kts inspect/app-build.gradle.kts
+          cp app/proguard-rules.pro inspect/
+          cp app/src/main/AndroidManifest.xml inspect/
+      - name: Upload source slice
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-reader-source-slice
+          path: inspect/
+          retention-days: 1
